@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strings"
 	"time"
@@ -19,35 +21,61 @@ const (
 	logFileName        = "espdproxy.log"
 	maxLogSize         = 15 * 1024 * 1024 // 15 MB
 	checkInterval      = 1 * time.Minute
-	targetGateway      = "192.168.1.1"
-	proxyServer        = "10.0.66.52:3128"
-	proxyOverride      = "192.168.*.*;192.25.*.*;<local>"
 )
 
 var (
-	logFile *os.File
-	logger  *log.Logger
+	logFile       *os.File
+	logger        *log.Logger
+	targetGateway string
+	proxyServer   string
+	proxyOverride string
+	fullUserName  string
+	findUserName  string
+	checkMode     string
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--install":
-			installService()
-			return
-		case "--uninstall":
-			uninstallService()
-			return
-		case "--service":
-			runService()
-			return
-		case "--test":
-			testProxySetting()
-			return
-		case "--help", "-h":
-			printHelp()
-			return
-		}
+	// Парсим флаги
+	installFlag := flag.Bool("install", false, "Install as Windows service")
+	uninstallFlag := flag.Bool("uninstall", false, "Remove Windows service")
+	serviceFlag := flag.Bool("service", false, "Run as service (for internal use)")
+	testFlag := flag.Bool("test", false, "Test mode")
+	helpFlag := flag.Bool("help", false, "Show help")
+	hFlag := flag.Bool("h", false, "Show help")
+
+	// Параметры конфигурации
+	flag.StringVar(&targetGateway, "gateway", "192.168.1.1", "Target gateway IP address")
+	flag.StringVar(&proxyServer, "proxy", "10.0.66.52:3128", "Proxy server address:port")
+	flag.StringVar(&proxyOverride, "override", "192.168.*.*;192.25.*.*;<local>", "Proxy override list")
+	flag.StringVar(&fullUserName, "fullname", "", "Exact username match (requires full match)")
+	flag.StringVar(&findUserName, "findname", "", "Partial username match (contains text)")
+	flag.StringVar(&checkMode, "mode", "gateway", "Check mode: gateway, user, or both")
+
+	flag.Parse()
+
+	if *helpFlag || *hFlag {
+		printHelp()
+		return
+	}
+
+	if *installFlag {
+		installService()
+		return
+	}
+
+	if *uninstallFlag {
+		uninstallService()
+		return
+	}
+
+	if *serviceFlag {
+		runService()
+		return
+	}
+
+	if *testFlag {
+		testProxySetting()
+		return
 	}
 
 	// Запуск без параметров = тестовый режим
@@ -81,15 +109,50 @@ func logToFile(message string) {
 	}
 }
 
+func getCurrentUsername() (string, error) {
+	currentUser, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return currentUser.Username, nil
+}
+
+func checkUserCondition() (bool, error) {
+	currentUser, err := getCurrentUsername()
+	if err != nil {
+		return false, err
+	}
+
+	logToFile(fmt.Sprintf("Current username: %s", currentUser))
+
+	// Проверяем полное совпадение
+	if fullUserName != "" {
+		if currentUser == fullUserName {
+			logToFile(fmt.Sprintf("Full username match: %s", fullUserName))
+			return true, nil
+		}
+		logToFile(fmt.Sprintf("Full username does not match: expected %s, got %s", fullUserName, currentUser))
+	}
+
+	// Проверяем частичное совпадение
+	if findUserName != "" {
+		if strings.Contains(currentUser, findUserName) {
+			logToFile(fmt.Sprintf("Partial username match: %s contains %s", currentUser, findUserName))
+			return true, nil
+		}
+		logToFile(fmt.Sprintf("Partial username not found: %s does not contain %s", currentUser, findUserName))
+	}
+
+	return false, nil
+}
+
 func getDefaultGateway() (string, error) {
-	// Используем route print для получения таблицы маршрутизации
 	cmd := exec.Command("route", "print", "-4")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("route print failed: %v", err)
 	}
 
-	// Парсим вывод команды route print
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	networkDestPattern := regexp.MustCompile(`^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+.*$`)
 
@@ -109,7 +172,6 @@ func getDefaultGateway() (string, error) {
 		return "", fmt.Errorf("default gateway not found in routing table")
 	}
 
-	// Проверяем, что это валидный IP-адрес
 	ipPattern := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`)
 	if !ipPattern.MatchString(gateway) {
 		return "", fmt.Errorf("invalid gateway IP: %s", gateway)
@@ -119,7 +181,6 @@ func getDefaultGateway() (string, error) {
 }
 
 func getActiveGateways() ([]string, error) {
-	// Альтернативный метод: получаем все активные шлюзы
 	cmd := exec.Command("netsh", "interface", "ip", "show", "config")
 	output, err := cmd.Output()
 	if err != nil {
@@ -129,7 +190,6 @@ func getActiveGateways() ([]string, error) {
 	var gateways []string
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 
-	// Шаблоны для поиска шлюзов
 	gatewayPatterns := []*regexp.Regexp{
 		regexp.MustCompile(`Default Gateway[\. ]*: (\d+\.\d+\.\d+\.\d+)`),
 		regexp.MustCompile(`Основной шлюз[\. ]*: (\d+\.\d+\.\d+\.\d+)`),
@@ -156,16 +216,13 @@ func getActiveGateways() ([]string, error) {
 }
 
 func isTargetGatewayActive() (bool, error) {
-	// Основной метод - через таблицу маршрутизации
 	defaultGateway, err := getDefaultGateway()
 	if err != nil {
-		// Альтернативный метод - ищем среди всех активных шлюзов
 		gateways, err := getActiveGateways()
 		if err != nil {
 			return false, err
 		}
 
-		// Проверяем, есть ли целевой шлюз среди активных
 		for _, gw := range gateways {
 			if gw == targetGateway {
 				return true, nil
@@ -176,6 +233,27 @@ func isTargetGatewayActive() (bool, error) {
 	}
 
 	return defaultGateway == targetGateway, nil
+}
+
+func shouldEnableProxy() (bool, error) {
+	switch checkMode {
+	case "gateway":
+		return isTargetGatewayActive()
+	case "user":
+		return checkUserCondition()
+	case "both":
+		gatewayOk, err := isTargetGatewayActive()
+		if err != nil {
+			return false, err
+		}
+		userOk, err := checkUserCondition()
+		if err != nil {
+			return false, err
+		}
+		return gatewayOk && userOk, nil
+	default:
+		return false, fmt.Errorf("unknown check mode: %s", checkMode)
+	}
 }
 
 func getCurrentProxySettings() (bool, string, error) {
@@ -192,7 +270,6 @@ func getCurrentProxySettings() (bool, string, error) {
 
 	server, _, err := k.GetStringValue("ProxyServer")
 	if err != nil {
-		// Если значение не существует, возвращаем пустую строку
 		server = ""
 	}
 
@@ -239,59 +316,79 @@ func setProxy(enable bool) error {
 
 func testProxySetting() {
 	fmt.Println("=== ESPD Proxy Service Test Mode ===")
-	fmt.Printf("Target gateway: %s\n", targetGateway)
+	fmt.Printf("Check mode: %s\n", checkMode)
+
+	if checkMode == "gateway" || checkMode == "both" {
+		fmt.Printf("Target gateway: %s\n", targetGateway)
+	}
+	if checkMode == "user" || checkMode == "both" {
+		if fullUserName != "" {
+			fmt.Printf("Full username: %s\n", fullUserName)
+		}
+		if findUserName != "" {
+			fmt.Printf("Find username: %s\n", findUserName)
+		}
+	}
 	fmt.Printf("Proxy server: %s\n", proxyServer)
 	fmt.Printf("Proxy override: %s\n", proxyOverride)
 	fmt.Println("")
 
-	// Получаем текущий шлюз
-	fmt.Println("Checking network configuration...")
+	fmt.Println("Checking conditions...")
 
-	defaultGateway, err := getDefaultGateway()
+	currentUser, err := getCurrentUsername()
 	if err != nil {
-		fmt.Printf("Warning: %v\n", err)
+		fmt.Printf("Error getting username: %v\n", err)
+	} else {
+		fmt.Printf("Current username: %s\n", currentUser)
+	}
 
-		// Пробуем альтернативный метод
-		gateways, err := getActiveGateways()
+	var result bool
+	var reason string
+
+	switch checkMode {
+	case "gateway":
+		gatewayActive, err := isTargetGatewayActive()
 		if err != nil {
-			fmt.Printf("Error: Could not determine gateway: %v\n", err)
-			fmt.Println("")
-			fmt.Println("Result: UNKNOWN (cannot determine gateway)")
+			fmt.Printf("Error checking gateway: %v\n", err)
 			return
 		}
+		result = gatewayActive
+		reason = "gateway check"
 
-		fmt.Printf("Found gateways: %v\n", gateways)
-
-		targetFound := false
-		for _, gw := range gateways {
-			if gw == targetGateway {
-				targetFound = true
-				break
-			}
+	case "user":
+		userOk, err := checkUserCondition()
+		if err != nil {
+			fmt.Printf("Error checking user: %v\n", err)
+			return
 		}
+		result = userOk
+		reason = "user check"
 
-		if targetFound {
-			fmt.Printf("✓ Target gateway %s found among active gateways\n", targetGateway)
-			fmt.Println("Result: WOULD ENABLE PROXY")
-		} else {
-			fmt.Printf("✗ Target gateway %s not found among active gateways\n", targetGateway)
-			fmt.Println("Result: WOULD DISABLE PROXY")
+	case "both":
+		gatewayActive, err := isTargetGatewayActive()
+		if err != nil {
+			fmt.Printf("Error checking gateway: %v\n", err)
+			return
 		}
+		userOk, err := checkUserCondition()
+		if err != nil {
+			fmt.Printf("Error checking user: %v\n", err)
+			return
+		}
+		result = gatewayActive && userOk
+		reason = "both gateway and user check"
+	}
+
+	if result {
+		fmt.Printf("✓ Conditions met (%s)\n", reason)
+		fmt.Println("Result: WOULD ENABLE PROXY")
 	} else {
-		fmt.Printf("Default gateway: %s\n", defaultGateway)
-
-		if defaultGateway == targetGateway {
-			fmt.Printf("✓ Target gateway matches: %s\n", targetGateway)
-			fmt.Println("Result: WOULD ENABLE PROXY")
-		} else {
-			fmt.Printf("✗ Target gateway does not match. Expected: %s, Got: %s\n", targetGateway, defaultGateway)
-			fmt.Println("Result: WOULD DISABLE PROXY")
-		}
+		fmt.Printf("✗ Conditions not met (%s)\n", reason)
+		fmt.Println("Result: WOULD DISABLE PROXY")
 	}
 
 	fmt.Println("")
 
-	// Показываем текущие настройки прокси
 	enabled, server, err := getCurrentProxySettings()
 	if err != nil {
 		fmt.Printf("Error reading current proxy settings: %v\n", err)
@@ -309,14 +406,17 @@ func testProxySetting() {
 }
 
 func checkAndSetProxy() {
-	targetActive, err := isTargetGatewayActive()
+	shouldEnable, err := shouldEnableProxy()
 	if err != nil {
-		logToFile(fmt.Sprintf("Error checking gateway: %v", err))
+		logToFile(fmt.Sprintf("Error checking conditions: %v", err))
 		return
 	}
 
-	if targetActive {
-		logToFile("Target gateway detected, enabling proxy")
+	logToFile(fmt.Sprintf("Configuration: mode=%s, gateway=%s, fullname=%s, findname=%s, proxy=%s",
+		checkMode, targetGateway, fullUserName, findUserName, proxyServer))
+
+	if shouldEnable {
+		logToFile("Conditions met, enabling proxy")
 		err := setProxy(true)
 		if err != nil {
 			logToFile(fmt.Sprintf("Error enabling proxy: %v", err))
@@ -324,7 +424,7 @@ func checkAndSetProxy() {
 			logToFile("Proxy enabled successfully")
 		}
 	} else {
-		logToFile("Target gateway not active, disabling proxy")
+		logToFile("Conditions not met, disabling proxy")
 		err := setProxy(false)
 		if err != nil {
 			logToFile(fmt.Sprintf("Error disabling proxy: %v", err))
@@ -342,6 +442,8 @@ func runService() {
 	defer logFile.Close()
 
 	logToFile("ESPD Proxy Service started")
+	logToFile(fmt.Sprintf("Service configuration: mode=%s, gateway=%s, fullname=%s, findname=%s, proxy=%s",
+		checkMode, targetGateway, fullUserName, findUserName, proxyServer))
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -360,9 +462,20 @@ func installService() {
 		return
 	}
 
-	// Устанавливаем службу с параметром --service для запуска в режиме службы
+	// Строим команду с параметрами
+	serviceArgs := fmt.Sprintf("\"%s --service --mode=%s --gateway=%s --proxy=%s --override=\"%s\"",
+		exePath, checkMode, targetGateway, proxyServer, proxyOverride)
+
+	if fullUserName != "" {
+		serviceArgs += fmt.Sprintf(" --fullname=\"%s\"", fullUserName)
+	}
+	if findUserName != "" {
+		serviceArgs += fmt.Sprintf(" --findname=\"%s\"", findUserName)
+	}
+	serviceArgs += "\""
+
 	cmd := exec.Command("sc", "create", serviceName,
-		"binPath=", fmt.Sprintf("\"%s --service\"", exePath),
+		"binPath=", serviceArgs,
 		"displayname=", serviceDescription,
 		"start=", "auto")
 
@@ -379,8 +492,21 @@ func installService() {
 		return
 	}
 
-	fmt.Printf("Service '%s' installed and started successfully\n", serviceName)
-	fmt.Println("The service will run with --service parameter in the background")
+	fmt.Printf("Service '%s' installed successfully with configuration:\n", serviceName)
+	fmt.Printf("  Mode: %s\n", checkMode)
+	if checkMode == "gateway" || checkMode == "both" {
+		fmt.Printf("  Gateway: %s\n", targetGateway)
+	}
+	if checkMode == "user" || checkMode == "both" {
+		if fullUserName != "" {
+			fmt.Printf("  Full username: %s\n", fullUserName)
+		}
+		if findUserName != "" {
+			fmt.Printf("  Find username: %s\n", findUserName)
+		}
+	}
+	fmt.Printf("  Proxy: %s\n", proxyServer)
+	fmt.Printf("  Override: %s\n", proxyOverride)
 }
 
 func uninstallService() {
@@ -399,15 +525,31 @@ func uninstallService() {
 
 func printHelp() {
 	fmt.Printf("ESPD Proxy Service\n")
-	fmt.Printf("Usage: %s [option]\n", os.Args[0])
-	fmt.Printf("Options:\n")
-	fmt.Printf("  --install     Install as Windows service\n")
-	fmt.Printf("  --uninstall   Remove Windows service\n")
-	fmt.Printf("  --service     Run as service (for internal use)\n")
-	fmt.Printf("  --test        Test mode - check what would happen without making changes\n")
-	fmt.Printf("  --help, -h    Show this help message\n")
-	fmt.Printf("\nIf no parameters are provided, test mode will run.\n")
-	fmt.Printf("Service checks default gateway every minute and sets proxy accordingly.\n")
+	fmt.Printf("Usage: %s [options]\n", os.Args[0])
+	fmt.Printf("\nOptions:\n")
+	fmt.Printf("  --install                Install as Windows service\n")
+	fmt.Printf("  --uninstall              Remove Windows service\n")
+	fmt.Printf("  --service                Run as service (for internal use)\n")
+	fmt.Printf("  --test                   Test mode\n")
+	fmt.Printf("  --help, -h               Show this help\n")
+	fmt.Printf("\nConfiguration options:\n")
+	fmt.Printf("  --mode string            Check mode: gateway, user, or both (default: gateway)\n")
+	fmt.Printf("  --gateway string         Target gateway IP (default: 192.168.1.1)\n")
+	fmt.Printf("  --fullname string        Exact username match (requires full match)\n")
+	fmt.Printf("  --findname string        Partial username match (contains text)\n")
+	fmt.Printf("  --proxy string           Proxy server address:port (default: 10.0.66.52:3128)\n")
+	fmt.Printf("  --override string        Proxy override list (default: 192.168.*.*;192.25.*.*;<local>)\n")
+	fmt.Printf("\nExamples:\n")
+	fmt.Printf("  # Check by gateway only (default)\n")
+	fmt.Printf("  %s --install --gateway=192.168.0.1\n", os.Args[0])
+	fmt.Printf("  # Check by exact username\n")
+	fmt.Printf("  %s --install --mode=user --fullname=DOMAIN\\username\n", os.Args[0])
+	fmt.Printf("  # Check by partial username\n")
+	fmt.Printf("  %s --install --mode=user --findname=admin\n", os.Args[0])
+	fmt.Printf("  # Check by both gateway and username\n")
+	fmt.Printf("  %s --install --mode=both --gateway=192.168.1.1 --findname=user\n", os.Args[0])
+	fmt.Printf("  # Test current username\n")
+	fmt.Printf("  %s --test --mode=user --fullname=DOMAIN\\username\n", os.Args[0])
 }
 
 // go mod init espв
@@ -416,3 +558,14 @@ func printHelp() {
 // env GOOS=windows GOARCH=amd64 go build -o espd-proxy-service.exe
 // set GOOS=windows&& set GOARCH=amd64&& go build -o espd-proxy-service64.exe
 // set GOOS=windows&& set GOARCH=amd32&& go build -o espd-proxy-service32.exe
+//
+//Проверка по точному имени пользователя:
+//--install --mode=user --fullname="DOMAIN\username" --proxy=10.0.66.52:3128
+//Проверка по частичному имени:
+//--install --mode=user --findname="admin" --proxy=10.0.66.52:3128
+//Комбинированная проверка:
+//--install --mode=both --gateway=192.168.1.1 --findname="user" --proxy=10.0.66.52:3128
+//Тестирование пользователя:
+//--test --mode=user --fullname="DOMAIN\username"
+//Только шлюз (как раньше):
+//--install --mode=gateway --gateway=192.168.1.1
