@@ -108,27 +108,23 @@ function Set-Proxy {
 function Test-ProxyHost {
     param(
         [string]$Host = "10.0.66.52",
-        [int]$Port = 3128,
-        [int]$Timeout = 2000
+        [int]$Count = 2,
+        [int]$Timeout = 1000
     )
 
     try {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $iar = $client.BeginConnect($Host, $Port, $null, $null)
-        $success = $iar.AsyncWaitHandle.WaitOne($Timeout, $false)
-
-        if ($success -and $client.Connected) {
-            $client.Close()
-            Write-Log "Proxy ${Host}:${Port} is reachable"
+        $result = Test-Connection -ComputerName $Host -Count $Count -Quiet -ErrorAction SilentlyContinue -TimeoutSeconds ($Timeout/1000)
+        if ($result) {
+            Write-Log "Proxy host $Host is reachable (ping ok)"
             return $true
         }
         else {
-            Write-Log "Proxy ${Host}:${Port} is NOT reachable (timeout)"
+            Write-Log "Proxy host $Host is NOT reachable (ping fail)"
             return $false
         }
     }
     catch {
-        Write-Log "Error checking proxy ${Host}:${Port}: $($_.Exception.Message)"
+        Write-Log "Error pinging proxy host $Host $(${_.Exception.Message})"
         return $false
     }
 }
@@ -139,12 +135,11 @@ function Test-ProxySetting {
     
     $proxyParts = $Proxy -split ":"
     $proxyHost = $proxyParts[0]
-    $proxyPort = if ($proxyParts.Count -gt 1) { [int]$proxyParts[1] } else { 3128 }
 
-    $hostAvailable = Test-ProxyHost -Host $proxyHost -Port $proxyPort
+    $hostAvailable = Test-ProxyHost -Host $proxyHost
 
     if (-not $hostAvailable) {
-        Write-Host "✗ Proxy ${proxyHost}:${proxyPort} is not reachable" -ForegroundColor Red
+        Write-Host "✗ Proxy host $proxyHost is not reachable" -ForegroundColor Red
         Write-Host "Result: WOULD DISABLE PROXY → WOULD SWITCH TO DIRECT CONNECTION" -ForegroundColor Red
         return
     }
@@ -195,12 +190,11 @@ function Check-AndSetProxy {
     
     $proxyParts = $Proxy -split ":"
     $proxyHost = $proxyParts[0]
-    $proxyPort = if ($proxyParts.Count -gt 1) { [int]$proxyParts[1] } else { 3128 }
 
-    $hostAvailable = Test-ProxyHost -Host $proxyHost -Port $proxyPort
+    $hostAvailable = Test-ProxyHost -Host $proxyHost
 
     if (-not $hostAvailable) {
-        Write-Log "Proxy ${proxyHost}:${proxyPort} is not reachable, disabling proxy"
+        Write-Log "Proxy host $proxyHost is not reachable, disabling proxy"
         $success = Set-Proxy -Enable $false
         if ($success) {
             Write-Log "Proxy disabled successfully → switched to DIRECT connection"
@@ -282,7 +276,7 @@ function Uninstall-Service {
     try {
         Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Host "Service '$ServiceName' uninstalled successfully!" -ForegroundColor Green
+        Write-Host ("Service '{0}' uninstalled successfully!" -f $ServiceName) -ForegroundColor Green
     }
     catch {
         Write-Host "Error uninstalling service: $($_.Exception.Message)" -ForegroundColor Red
