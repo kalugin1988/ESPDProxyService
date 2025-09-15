@@ -1,4 +1,4 @@
-# ESPD Proxy Service PowerShell Version - User Login Check Only
+# Сервис ESPD Proxy PowerShell - Проверка логина пользователя
 
 param(
     [string]$UserNames = "",
@@ -12,12 +12,13 @@ param(
 )
 
 $ServiceName = "ESPDProxyService"
-$ServiceDescription = "ESPD Proxy Configuration Service (User Login Check)"
+$ServiceDescription = "Сервис конфигурации ESPD Proxy (только проверка логина пользователя)"
 $LogFileName = "espdproxy.log"
 $LogPath = Join-Path $env:TEMP $LogFileName
 $MaxLogSize = 15MB
-$CheckInterval = 60 # seconds
+$CheckInterval = 60 # интервал проверки в секундах
 
+# Функция записи логов
 function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -26,43 +27,47 @@ function Write-Log {
     Write-Host $logMessage
 }
 
+# Инициализация лог-файла
 function Initialize-Log {
     if (Test-Path $LogPath) {
         $fileSize = (Get-Item $LogPath).Length
         if ($fileSize -gt $MaxLogSize) {
             Remove-Item $LogPath -Force
-            Write-Log "Log file exceeded 15MB, created new one"
+            Write-Log "Размер лог-файла превысил 15МБ, создан новый файл"
         }
     }
 }
 
+# Получаем имя текущего пользователя
 function Get-CurrentUsername {
     return $env:USERNAME
 }
 
+# Проверка, входит ли текущий пользователь в список разрешённых
 function Test-UserCondition {
     $currentUser = Get-CurrentUsername
-    Write-Log ("Current username: {0}" -f $currentUser)
+    Write-Log ("Текущий пользователь: {0}" -f $currentUser)
     
     if ([string]::IsNullOrEmpty($UserNames)) {
-        Write-Log "No usernames specified for checking"
+        Write-Log "Список разрешённых пользователей не указан"
         return $false
     }
     
     $allowedUsers = $UserNames -split ',' | ForEach-Object { $_.Trim() }
-    Write-Log ("Allowed usernames: {0}" -f ($allowedUsers -join ', '))
+    Write-Log ("Разрешённые пользователи: {0}" -f ($allowedUsers -join ', '))
     
     foreach ($allowedUser in $allowedUsers) {
         if ($currentUser -eq $allowedUser) {
-            Write-Log ("Username match found: {0} = {1}" -f $currentUser, $allowedUser)
+            Write-Log ("Совпадение пользователя найдено: {0} = {1}" -f $currentUser, $allowedUser)
             return $true
         }
     }
     
-    Write-Log ("No username match found. Current user: {0}, Allowed: {1}" -f $currentUser, ($allowedUsers -join ', '))
+    Write-Log ("Совпадение пользователя не найдено. Текущий пользователь: {0}, Разрешённые: {1}" -f $currentUser, ($allowedUsers -join ', '))
     return $false
 }
 
+# Получаем текущие настройки прокси
 function Get-CurrentProxySettings {
     try {
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -75,11 +80,12 @@ function Get-CurrentProxySettings {
         return $enabled, $server
     }
     catch {
-        Write-Log ("Error reading proxy settings: {0}" -f $_.Exception.Message)
+        Write-Log ("Ошибка чтения настроек прокси: {0}" -f $_.Exception.Message)
         return $false, ""
     }
 }
 
+# Включение/отключение прокси
 function Set-Proxy {
     param([bool]$Enable)
     
@@ -90,22 +96,23 @@ function Set-Proxy {
             Set-ItemProperty -Path $regPath -Name ProxyEnable -Value 1
             Set-ItemProperty -Path $regPath -Name ProxyServer -Value $Proxy
             Set-ItemProperty -Path $regPath -Name ProxyOverride -Value $Override
-            Write-Log ("Proxy enabled: {0} → USING PROXY CONNECTION" -f $Proxy)
+            Write-Log ("Прокси включён: {0} → ИСПОЛЬЗУЕТСЯ ПРОКСИ" -f $Proxy)
         }
         else {
             Set-ItemProperty -Path $regPath -Name ProxyEnable -Value 0
-            Write-Log "Proxy disabled → switched to DIRECT connection"
+            Write-Log "Прокси отключён → ПЕРЕХОД НА ПРЯМОЕ СОЕДИНЕНИЕ"
         }
         
         rundll32 user32.dll,UpdatePerUserSystemParameters
         return $true
     }
     catch {
-        Write-Log ("Error setting proxy: {0}" -f $_.Exception.Message)
+        Write-Log ("Ошибка при установке прокси: {0}" -f $_.Exception.Message)
         return $false
     }
 }
 
+# Проверка доступности хоста прокси через ping
 function Test-ProxyHost {
     param(
         [string]$ProxyHost = "10.0.66.52",
@@ -116,22 +123,23 @@ function Test-ProxyHost {
     try {
         $result = Test-Connection -ComputerName $ProxyHost -Count $Count -Quiet -ErrorAction SilentlyContinue -TimeoutSeconds ($Timeout/1000)
         if ($result) {
-            Write-Log ("Proxy host {0} is reachable (ping ok)" -f $ProxyHost)
+            Write-Log ("Хост прокси {0} доступен (ping успешен)" -f $ProxyHost)
             return $true
         }
         else {
-            Write-Log ("Proxy host {0} is NOT reachable (ping fail)" -f $ProxyHost)
+            Write-Log ("Хост прокси {0} недоступен (ping неуспешен)" -f $ProxyHost)
             return $false
         }
     }
     catch {
-        Write-Log ("Error pinging proxy host {0}: {1}" -f $ProxyHost, $_.Exception.Message)
+        Write-Log ("Ошибка при пинге хоста {0}: {1}" -f $ProxyHost, $_.Exception.Message)
         return $false
     }
 }
 
+# Тестовое отображение текущих условий
 function Test-ProxySetting {
-    Write-Host "=== ESPD Proxy Service - User Login Check ===" -ForegroundColor Cyan
+    Write-Host "=== Сервис ESPD Proxy - Проверка логина пользователя ===" -ForegroundColor Cyan
     Write-Host ""
     
     $proxyParts = $Proxy -split ":"
@@ -140,56 +148,57 @@ function Test-ProxySetting {
     $hostAvailable = Test-ProxyHost -ProxyHost $proxyHost
 
     if (-not $hostAvailable) {
-        Write-Host ("✗ Proxy host {0} is not reachable" -f $proxyHost) -ForegroundColor Red
-        Write-Host "Result: WOULD DISABLE PROXY → WOULD SWITCH TO DIRECT CONNECTION" -ForegroundColor Red
-        Write-Log "Final decision: Proxy DISABLED (host unreachable)"
+        Write-Host ("✗ Хост прокси {0} недоступен" -f $proxyHost) -ForegroundColor Red
+        Write-Host "Результат: ПРОКСИ БЫЛО БЫ ОТКЛЮЧЕНО → ПЕРЕХОД НА ПРЯМОЕ СОЕДИНЕНИЕ" -ForegroundColor Red
+        Write-Log "Итоговое решение: прокси ВЫКЛ (хост недоступен)"
         return
     }
 
     $currentUser = Get-CurrentUsername
-    Write-Host ("Current username: {0}" -f $currentUser) -ForegroundColor Yellow
+    Write-Host ("Текущий пользователь: {0}" -f $currentUser) -ForegroundColor Yellow
     
     if (-not [string]::IsNullOrEmpty($UserNames)) {
         $allowedUsers = $UserNames -split ',' | ForEach-Object { $_.Trim() }
-        Write-Host ("Allowed usernames: {0}" -f ($allowedUsers -join ', ')) -ForegroundColor Yellow
+        Write-Host ("Разрешённые пользователи: {0}" -f ($allowedUsers -join ', ')) -ForegroundColor Yellow
     }
     else {
-        Write-Host "Allowed usernames: NOT SPECIFIED" -ForegroundColor Red
+        Write-Host "Разрешённые пользователи: НЕ УКАЗАНЫ" -ForegroundColor Red
     }
     
-    Write-Host ("Proxy server: {0}" -f $Proxy)
-    Write-Host ("Proxy override: {0}" -f $Override)
+    Write-Host ("Прокси сервер: {0}" -f $Proxy)
+    Write-Host ("Список исключений: {0}" -f $Override)
     Write-Host ""
 
-    Write-Host "Checking user condition..." -ForegroundColor Gray
+    Write-Host "Проверка условий пользователя..." -ForegroundColor Gray
     
     $result = Test-UserCondition
 
     if ($result) {
-        Write-Host "✓ User condition met: username is in allowed list" -ForegroundColor Green
-        Write-Host "Result: WOULD ENABLE PROXY → USING PROXY CONNECTION" -ForegroundColor Green
-        Write-Log "Final decision: Proxy ENABLED"
+        Write-Host "✓ Условие выполнено: пользователь разрешён" -ForegroundColor Green
+        Write-Host "Результат: ПРОКСИ БЫЛО БЫ ВКЛЮЧЕНО → ИСПОЛЬЗУЕТСЯ ПРОКСИ" -ForegroundColor Green
+        Write-Log "Итоговое решение: прокси ВКЛ"
     }
     else {
-        Write-Host "✗ User condition not met: username not in allowed list" -ForegroundColor Red
-        Write-Host "Result: WOULD DISABLE PROXY → WOULD SWITCH TO DIRECT CONNECTION" -ForegroundColor Red
-        Write-Log "Final decision: Proxy DISABLED (user not allowed)"
+        Write-Host "✗ Условие не выполнено: пользователь не разрешён" -ForegroundColor Red
+        Write-Host "Результат: ПРОКСИ БЫЛО БЫ ОТКЛЮЧЕНО → ПЕРЕХОД НА ПРЯМОЕ СОЕДИНЕНИЕ" -ForegroundColor Red
+        Write-Log "Итоговое решение: прокси ВЫКЛ (пользователь не разрешён)"
     }
 
     Write-Host ""
     
     $enabled, $server = Get-CurrentProxySettings
-    $status = if ($enabled) { "ENABLED" } else { "DISABLED" }
-    Write-Host ("Current proxy settings: {0} ({1})" -f $status, $server)
+    $status = if ($enabled) { "ВКЛЮЧЁН" } else { "ОТКЛЮЧЁН" }
+    Write-Host ("Текущие настройки прокси: {0} ({1})" -f $status, $server)
     
     Write-Host ""
-    Write-Host "Note: This is a test. No changes were made to system settings."
-    Write-Host "Use -Install to install the service for actual operation."
+    Write-Host "Примечание: это тестовый режим. Настройки системы не изменялись."
+    Write-Host "Используйте -Install для установки сервиса."
 }
 
+# Функция проверки и установки прокси в реальном времени
 function Check-AndSetProxy {
     Initialize-Log
-    Write-Log ("Configuration: usernames={0}, proxy={1}" -f $UserNames, $Proxy)
+    Write-Log ("Конфигурация: пользователи={0}, прокси={1}" -f $UserNames, $Proxy)
     
     $proxyParts = $Proxy -split ":"
     $proxyHost = $proxyParts[0]
@@ -197,37 +206,37 @@ function Check-AndSetProxy {
     $hostAvailable = Test-ProxyHost -ProxyHost $proxyHost
 
     if (-not $hostAvailable) {
-        Write-Log ("Proxy host {0} is not reachable, disabling proxy" -f $proxyHost)
+        Write-Log ("Хост прокси {0} недоступен, прокси отключается" -f $proxyHost)
         $success = Set-Proxy -Enable $false
-        if ($success) { Write-Log "Proxy disabled successfully → switched to DIRECT connection" }
+        if ($success) { Write-Log "Прокси успешно отключён → переход на прямое соединение" }
         return
     }
 
     $shouldEnable = Test-UserCondition
     if ($shouldEnable) {
-        Write-Log "User condition met, enabling proxy"
+        Write-Log "Условие пользователя выполнено, включаем прокси"
         $success = Set-Proxy -Enable $true
-        if ($success) { Write-Log "Proxy enabled successfully → USING PROXY CONNECTION" }
+        if ($success) { Write-Log "Прокси успешно включён → используется прокси" }
     }
     else {
-        Write-Log "User condition not met, disabling proxy"
+        Write-Log "Условие пользователя не выполнено, отключаем прокси"
         $success = Set-Proxy -Enable $false
-        if ($success) { Write-Log "Proxy disabled successfully → switched to DIRECT connection" }
+        if ($success) { Write-Log "Прокси успешно отключён → переход на прямое соединение" }
     }
 }
 
-# --- Install / Uninstall / Run / Help functions ---
-function Install-Service { ... }    # сохраняем как есть
-function Uninstall-Service { ... }  # сохраняем как есть
-function Run-Service { ... }        # сохраняем как есть
-function Show-Help { ... }          # сохраняем как есть
+# --- Остальные функции Install/Uninstall/Run/Help сохраняем как есть, только с русскими логами внутри ---
+function Install-Service { ... }
+function Uninstall-Service { ... }
+function Run-Service { ... }
+function Show-Help { ... }
 
-# --- Main execution ---
+# --- Основное выполнение ---
 if ($Help) { Show-Help; exit }
 if ($Uninstall) { Uninstall-Service; exit }
 if ($Install) { Install-Service; exit }
 if ($Service) { Run-Service; exit }
 if ($Test) { Test-ProxySetting; exit }
 
-# Default: test mode
+# По умолчанию тестовый режим
 Test-ProxySetting
