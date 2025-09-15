@@ -1,11 +1,12 @@
 # ESPD Proxy PowerShell - Проверка логина пользователя и настройка прокси
+# Кодировка: UTF-8 с BOM
 
 param(
     [string]$UserNames = "",
     [string]$Proxy = "10.0.66.52:3128",
     [string]$Override = "192.168.*.*;192.25.*.*;<local>",
     [switch]$Test,     # тестовый режим
-    [switch]$Apply     # рабочий режим, реально изменяет прокси
+    [switch]$Apply     # рабочий режим
 )
 
 $LogFileName = "espdproxy.log"
@@ -25,7 +26,7 @@ function Initialize-Log {
         $fileSize = (Get-Item $LogPath).Length
         if ($fileSize -gt $MaxLogSize) {
             Remove-Item $LogPath -Force
-            Write-Log "Размер лог-файла превысил 15МБ, создан новый файл"
+            Write-Log "Размер лог-файла превысил 15 МБ, создан новый файл"
         }
     }
 }
@@ -107,12 +108,12 @@ function Test-ProxyHost {
     )
 
     try {
-        $result = Test-Connection -ComputerName $ProxyHost -Count $Count -Quiet -ErrorAction SilentlyContinue -TimeoutSeconds ($Timeout/1000)
-        if ($result) {
+        # Используем ping.exe для совместимости с Windows PowerShell 5.1
+        $pingResult = ping.exe $ProxyHost -n $Count -w $Timeout | Select-String "TTL="
+        if ($pingResult) {
             Write-Log ("Хост прокси {0} доступен" -f $ProxyHost)
             return $true
-        }
-        else {
+        } else {
             Write-Log ("Хост прокси {0} недоступен" -f $ProxyHost)
             return $false
         }
@@ -123,14 +124,15 @@ function Test-ProxyHost {
     }
 }
 
+
 function Test-ProxySetting {
     Write-Host "=== Тест ESPD Proxy ===" -ForegroundColor Cyan
     $proxyParts = $Proxy -split ":"
     $proxyHost = $proxyParts[0]
 
     $hostAvailable = Test-ProxyHost -ProxyHost $proxyHost
-
     $currentUser = Get-CurrentUsername
+    
     Write-Host ("Текущий пользователь: {0}" -f $currentUser)
     
     if (-not [string]::IsNullOrEmpty($UserNames)) {
@@ -165,7 +167,6 @@ function Apply-ProxySetting {
 
     $proxyParts = $Proxy -split ":"
     $proxyHost = $proxyParts[0]
-
     $hostAvailable = Test-ProxyHost -ProxyHost $proxyHost
 
     if (-not $hostAvailable) {
